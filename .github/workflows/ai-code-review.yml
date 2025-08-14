@@ -50,13 +50,13 @@ jobs:
         if: steps.changed-files.outputs.any_changed == 'true'
         run: |
           npm init -y
-          npm install axios @octokit/rest openai
+          npm install axios @octokit/rest
 
-      - name: Run AI Review
+      - name: Run AI Review (Groq API)
         if: steps.changed-files.outputs.any_changed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
           GITHUB_CONTEXT: ${{ toJson(github) }}
         run: |
@@ -64,11 +64,9 @@ jobs:
           import fs from 'fs';
           import path from 'path';
           import { Octokit } from '@octokit/rest';
-          import OpenAI from 'openai';
+          import axios from 'axios';
 
           const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
           const changedFiles = process.env.CHANGED_FILES?.split(' ') || [];
           const context = JSON.parse(process.env.GITHUB_CONTEXT || '{}');
 
@@ -106,13 +104,23 @@ jobs:
             `;
 
             try {
-              const res = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.3
-              });
+              const res = await axios.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {
+                  model: "llama3-8b-8192",
+                  messages: [{ role: "user", content: prompt }],
+                  temperature: 0.3
+                },
+                {
+                  headers: {
+                    Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+                    "Content-Type": "application/json"
+                  }
+                }
+              );
 
-              const match = res.choices[0].message.content.match(/\{[\s\S]*\}/);
+              const content = res.data.choices[0].message.content;
+              const match = content.match(/\{[\s\S]*\}/);
               return match ? JSON.parse(match[0]) : null;
             } catch (e) {
               console.error("Error analyzing file:", filePath, e);
