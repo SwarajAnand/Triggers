@@ -1,9 +1,10 @@
-import React from 'react'
+import React from "react";
 
 const App = () => {
-  return (
-    <div>Testing the app</div>
-  )
-}
+  function add(a, b) {
+    return a + b;
+  }
+  return <div>Testing the app</div>;
+};
 
-export default App
+export default App;

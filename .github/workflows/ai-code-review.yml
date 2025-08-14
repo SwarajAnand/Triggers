@@ -1,0 +1,185 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+      - develop
+      - master
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            **/*.js
+            **/*.ts
+            **/*.jsx
+            **/*.tsx
+            **/*.py
+            **/*.java
+            **/*.cpp
+            **/*.c
+            **/*.cs
+            **/*.go
+            **/*.rs
+            **/*.php
+            **/*.rb
+
+      - name: Setup Node.js
+        if: steps.changed-files.outputs.any_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          npm init -y
+          npm install axios @octokit/rest openai
+
+      - name: Run AI Review
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { Octokit } = require('@octokit/rest');
+          const OpenAI = require('openai');
+
+          const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+          const changedFiles = process.env.CHANGED_FILES?.split(' ') || [];
+          const context = JSON.parse(process.env.GITHUB_CONTEXT || '{}');
+
+          const getLanguage = (ext) => ({
+            '.js': 'javascript',
+            '.ts': 'typescript',
+            '.jsx': 'javascript',
+            '.tsx': 'typescript',
+            '.py': 'python',
+            '.java': 'java',
+            '.cpp': 'cpp',
+            '.c': 'c',
+            '.cs': 'csharp',
+            '.go': 'go',
+            '.rs': 'rust',
+            '.php': 'php',
+            '.rb': 'ruby'
+          }[ext] || 'text');
+
+          async function analyzeCode(filePath, code) {
+            const prompt = `
+            Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
+            {
+              "score": 1-10,
+              "summary": "short summary",
+              "comments": [
+                { "line": null, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
+              ]
+            }
+
+            Code:
+            \`\`\`
+            ${code}
+            \`\`\`
+            `;
+
+            try {
+              const res = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.3
+              });
+
+              const match = res.choices[0].message.content.match(/\{[\s\S]*\}/);
+              return match ? JSON.parse(match[0]) : null;
+            } catch (e) {
+              console.error("Error analyzing file:", filePath, e);
+              return null;
+            }
+          }
+
+          async function postPRComments(reviews) {
+            const [owner, repo] = context.repository.split('/');
+            const prNumber = context.payload.pull_request.number;
+
+            for (const review of reviews) {
+              if (!review || !review.comments) continue;
+              for (const comment of review.comments) {
+                await octokit.pulls.createReviewComment({
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  body: `**${comment.type.toUpperCase()} (${comment.severity})**: ${comment.message}`,
+                  commit_id: context.payload.pull_request.head.sha,
+                  path: review.filePath,
+                  line: comment.line || 1,
+                  side: 'RIGHT'
+                });
+              }
+            }
+          }
+
+          async function postPushIssue(reviews) {
+            const [owner, repo] = context.repository.split('/');
+            const commitSha = context.sha.substring(0, 7);
+            let body = `## 🤖 AI Code Review - Commit \`${commitSha}\`\n\n`;
+
+            for (const r of reviews) {
+              if (!r) continue;
+              body += `### \`${r.filePath}\`\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
+              r.comments.forEach(c => {
+                body += `- (${c.severity}) ${c.type}: ${c.message}\n`;
+              });
+              body += `\n---\n`;
+            }
+
+            await octokit.issues.create({
+              owner,
+              repo,
+              title: `🤖 AI Code Review - ${commitSha}`,
+              body
+            });
+          }
+
+          (async () => {
+            let reviews = [];
+            for (const filePath of changedFiles) {
+              if (fs.existsSync(filePath)) {
+                const code = fs.readFileSync(filePath, 'utf8');
+                const result = await analyzeCode(filePath, code);
+                if (result) {
+                  result.filePath = filePath;
+                  reviews.push(result);
+                }
+              }
+            }
+
+            if (context.event_name === 'pull_request') {
+              await postPRComments(reviews);
+            } else {
+              await postPushIssue(reviews);
+            }
+          })();
+          EOF
