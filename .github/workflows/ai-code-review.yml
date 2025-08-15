@@ -87,21 +87,30 @@ jobs:
           }[ext] || 'text');
 
           async function analyzeCode(filePath, code) {
+            const language = getLanguage(path.extname(filePath));
             const prompt = `
-            Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
-            {
-              "score": 1-10,
-              "summary": "short summary",
-              "comments": [
-                { "line": null, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
-              ]
-            }
+You are an AI code reviewer.
+Return ONLY valid JSON in the following structure without any extra text:
 
-            Code:
-            \`\`\`
-            ${code}
-            \`\`\`
-            `;
+{
+  "score": 1-10,
+  "summary": "Brief summary of code quality",
+  "comments": [
+    { "line": null, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "Detailed suggestion" }
+  ]
+}
+
+Review this ${language} code:
+
+\`\`\`${language}
+${code}
+\`\`\`
+
+Rules:
+- Follow JSON format exactly.
+- Do not add any explanation outside JSON.
+- If there are no comments, return an empty array in "comments".
+`;
 
             try {
               const res = await axios.post(
@@ -109,7 +118,7 @@ jobs:
                 {
                   model: "llama3-8b-8192",
                   messages: [{ role: "user", content: prompt }],
-                  temperature: 0.3
+                  temperature: 0.2
                 },
                 {
                   headers: {
@@ -119,18 +128,21 @@ jobs:
                 }
               );
 
-              const content = res.data.choices[0].message.content || "";
+              let content = res.data.choices[0].message.content || "";
               const match = content.match(/\{[\s\S]*\}/);
-
               if (match) {
-                try {
-                  return JSON.parse(match[0]);
-                } catch (err) {
-                  console.warn("Invalid JSON from AI, using raw text as summary.");
-                  return { score: 5, summary: content, comments: [] };
-                }
-              } else {
-                return { score: 5, summary: content, comments: [] };
+                content = match[0];
+              }
+
+              try {
+                return JSON.parse(content);
+              } catch (err) {
+                console.warn("JSON parse error, repairing...");
+                content = content
+                  .replace(/(\w+):/g, '"$1":') // add quotes to keys
+                  .replace(/,\s*}/g, '}')      // remove trailing commas
+                  .replace(/,\s*]/g, ']');     // remove trailing commas in arrays
+                return JSON.parse(content);
               }
             } catch (e) {
               console.error("Error analyzing file:", filePath, e.message);
@@ -146,21 +158,25 @@ jobs:
             const [owner, repo] = context.repository.split('/');
             const prNumber = context.payload.pull_request.number;
 
+            // One big comment instead of many small ones
+            let body = "## 🤖 AI Code Review\n\n";
             for (const review of reviews) {
-              if (!review || !review.comments) continue;
-              for (const comment of review.comments) {
-                await octokit.pulls.createReviewComment({
-                  owner,
-                  repo,
-                  pull_number: prNumber,
-                  body: `**${comment.type?.toUpperCase() || "NOTE"} (${comment.severity || "info"})**: ${comment.message}`,
-                  commit_id: context.payload.pull_request.head.sha,
-                  path: review.filePath,
-                  line: comment.line || 1,
-                  side: 'RIGHT'
+              body += `### 📄 ${review.filePath}\n**Score:** ${review.score}/10\n**Summary:** ${review.summary}\n\n`;
+              if (review.comments.length > 0) {
+                body += "**Suggestions:**\n";
+                review.comments.forEach((c, i) => {
+                  body += `${i + 1}. (${c.severity}) ${c.type} - ${c.message}\n`;
                 });
               }
+              body += "\n---\n";
             }
+
+            await octokit.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body
+            });
           }
 
           async function postPushIssue(reviews) {
@@ -169,12 +185,14 @@ jobs:
             let body = `## 🤖 AI Code Review - Commit \`${commitSha}\`\n\n`;
 
             for (const r of reviews) {
-              if (!r) continue;
-              body += `### \`${r.filePath}\`\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
-              r.comments.forEach(c => {
-                body += `- (${c.severity}) ${c.type}: ${c.message}\n`;
-              });
-              body += `\n---\n`;
+              body += `### 📄 ${r.filePath}\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
+              if (r.comments.length > 0) {
+                body += "**Suggestions:**\n";
+                r.comments.forEach((c, i) => {
+                  body += `${i + 1}. (${c.severity}) ${c.type} - ${c.message}\n`;
+                });
+              }
+              body += "\n---\n";
             }
 
             await octokit.issues.create({
