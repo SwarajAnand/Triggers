@@ -4,7 +4,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches: [main, master, develop]
+    branches:
+      - "**" # Match all branches
 
 jobs:
   ai-review:
