@@ -2,63 +2,36 @@ name: AI Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize]
   push:
-    branches:
-      - main
-      - develop
-      - master
+    branches: [main]
 
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 2
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          npm install @octokit/rest axios
+      
       - name: Get changed files
         id: changed-files
         uses: tj-actions/changed-files@v44
         with:
-          files: |
-            **/*.js
-            **/*.ts
-            **/*.jsx
-            **/*.tsx
-            **/*.py
-            **/*.java
-            **/*.cpp
-            **/*.c
-            **/*.cs
-            **/*.go
-            **/*.rs
-            **/*.php
-            **/*.rb
-
-      - name: Setup Node.js
+          separator: ' '
+      
+      - name: Run AI Code Review
         if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      - name: Install dependencies
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: |
-          npm init -y
-          npm install axios @octokit/rest
-
-      - name: Run AI Review (Groq API)
-        if: steps.changed-files.outputs.any_changed == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-          GITHUB_CONTEXT: ${{ toJson(github) }}
         run: |
           node --input-type=module - <<'EOF'
           import fs from 'fs';
@@ -93,7 +66,7 @@ jobs:
               "score": 1-10,
               "summary": "short summary",
               "comments": [
-                { "line": null, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
+                { "line": 5, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
               ]
             }
 
@@ -139,34 +112,63 @@ jobs:
           }
 
           async function postPRComments(reviews) {
-            if (!context.payload?.pull_request) {
-              console.warn("No PR context found, skipping PR comments.");
+            if (context.event_name !== 'pull_request') {
+              console.warn("Not a pull request event, skipping PR comments.");
               return;
             }
 
-            const repoFullName = context.repository?.full_name || "";
-            const [owner, repo] = repoFullName.split('/');
-            const prNumber = context.payload.pull_request.number;
+            const pullRequest = context.event?.pull_request;
+            if (!pullRequest) {
+              console.warn("No pull request data found in context, skipping PR comments.");
+              return;
+            }
 
-            for (const review of reviews) {
-              if (!review?.comments) continue;
-              for (const comment of review.comments) {
-                await octokit.pulls.createReviewComment({
-                  owner,
-                  repo,
-                  pull_number: prNumber,
-                  body: `**${comment.type?.toUpperCase() || "NOTE"} (${comment.severity || "info"})**: ${comment.message}`,
-                  commit_id: context.payload.pull_request.head.sha,
-                  path: review.filePath,
-                  line: comment.line || 1,
-                  side: 'RIGHT'
-                });
+            const repoFullName = context.repository?.full_name;
+            if (!repoFullName) {
+              console.warn("No repository full name found, skipping PR comments.");
+              return;
+            }
+
+            const [owner, repo] = repoFullName.split('/');
+            const prNumber = pullRequest.number;
+            const commitSha = pullRequest.head.sha;
+
+            console.log(`Posting comments to PR #${prNumber} in ${owner}/${repo}`);
+
+            try {
+              for (const review of reviews) {
+                if (!review?.comments || review.comments.length === 0) continue;
+                
+                for (const comment of review.comments) {
+                  try {
+                    await octokit.pulls.createReviewComment({
+                      owner,
+                      repo,
+                      pull_number: prNumber,
+                      body: `**${comment.type?.toUpperCase() || "NOTE"} (${comment.severity || "info"})**: ${comment.message}`,
+                      commit_id: commitSha,
+                      path: review.filePath,
+                      line: comment.line || 1,
+                      side: 'RIGHT'
+                    });
+                    console.log(`Posted comment for ${review.filePath}:${comment.line || 1}`);
+                  } catch (error) {
+                    console.error(`Failed to post comment for ${review.filePath}:`, error.message);
+                  }
+                }
               }
+            } catch (error) {
+              console.error("Error posting PR comments:", error.message);
             }
           }
 
           async function postPushIssue(reviews) {
-            const repoFullName = context.repository?.full_name || "";
+            const repoFullName = context.repository?.full_name;
+            if (!repoFullName) {
+              console.warn("No repository full name found, skipping issue creation.");
+              return;
+            }
+
             const [owner, repo] = repoFullName.split('/');
             const commitSha = context.sha?.substring(0, 7) || "unknown";
             let body = `## 🤖 AI Code Review - Commit \`${commitSha}\`\n\n`;
@@ -174,36 +176,59 @@ jobs:
             for (const r of reviews) {
               if (!r) continue;
               body += `### \`${r.filePath}\`\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
-              r.comments.forEach(c => {
-                body += `- (${c.severity}) ${c.type}: ${c.message}\n`;
-              });
+              if (r.comments && r.comments.length > 0) {
+                r.comments.forEach(c => {
+                  body += `- (${c.severity}) ${c.type}: ${c.message}\n`;
+                });
+              }
               body += `\n---\n`;
             }
 
-            await octokit.issues.create({
-              owner,
-              repo,
-              title: `🤖 AI Code Review - ${commitSha}`,
-              body
-            });
+            try {
+              await octokit.issues.create({
+                owner,
+                repo,
+                title: `🤖 AI Code Review - ${commitSha}`,
+                body
+              });
+              console.log(`Created issue for commit ${commitSha}`);
+            } catch (error) {
+              console.error("Error creating issue:", error.message);
+            }
           }
 
           (async () => {
+            console.log(`Event: ${context.event_name}`);
+            console.log(`Changed files: ${changedFiles.join(', ')}`);
+            
             let reviews = [];
             for (const filePath of changedFiles) {
-              if (!fs.existsSync(filePath)) continue; // skip deleted files
+              if (!fs.existsSync(filePath)) {
+                console.log(`Skipping deleted file: ${filePath}`);
+                continue;
+              }
+              
+              console.log(`Analyzing: ${filePath}`);
               const code = fs.readFileSync(filePath, 'utf8');
               const result = await analyzeCode(filePath, code);
               if (result) {
                 result.filePath = filePath;
                 reviews.push(result);
+                console.log(`Analysis complete for ${filePath}: Score ${result.score}/10`);
               }
             }
 
             if (context.event_name === 'pull_request') {
+              console.log("Processing as pull request...");
               await postPRComments(reviews);
             } else {
+              console.log("Processing as push event...");
               await postPushIssue(reviews);
             }
           })();
           EOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          GITHUB_CONTEXT: ${{ toJson(github) }}
