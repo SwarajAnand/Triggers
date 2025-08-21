@@ -2,13 +2,18 @@ name: AI Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
   push:
-    branches: [main]
+    branches: [main, master, develop]
 
 jobs:
   ai-review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,7 +33,31 @@ jobs:
         id: changed-files
         uses: tj-actions/changed-files@v44
         with:
+          files: |
+            **/*.js
+            **/*.jsx
+            **/*.ts
+            **/*.tsx
+            **/*.py
+            **/*.java
+            **/*.cpp
+            **/*.c
+            **/*.cs
+            **/*.go
+            **/*.rs
+            **/*.php
+            **/*.rb
+            **/*.yml
+            **/*.yaml
           separator: ' '
+      
+      - name: Debug Context
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "Ref: ${{ github.ref }}"
       
       - name: Run AI Code Review
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -43,6 +72,18 @@ jobs:
           const changedFiles = process.env.CHANGED_FILES?.split(' ') || [];
           const context = JSON.parse(process.env.GITHUB_CONTEXT || '{}');
 
+          // Debug: Print context to see what we're getting
+          console.log('=== DEBUG: Context Analysis ===');
+          console.log('Event name:', context.event_name);
+          console.log('Repository:', context.repository);
+          console.log('Repository full_name:', context.repository?.full_name);
+          console.log('Repository name:', context.repository?.name);
+          console.log('Repository owner:', context.repository?.owner?.login);
+          console.log('Actor:', context.actor);
+          console.log('Ref:', context.ref);
+          console.log('SHA:', context.sha);
+          console.log('================================');
+
           const getLanguage = (ext) => ({
             '.js': 'javascript',
             '.ts': 'typescript',
@@ -56,7 +97,9 @@ jobs:
             '.go': 'go',
             '.rs': 'rust',
             '.php': 'php',
-            '.rb': 'ruby'
+            '.rb': 'ruby',
+            '.yml': 'yaml',
+            '.yaml': 'yaml'
           }[ext] || 'text');
 
           async function analyzeCode(filePath, code) {
@@ -123,13 +166,19 @@ jobs:
               return;
             }
 
-            const repoFullName = context.repository?.full_name;
-            if (!repoFullName) {
-              console.warn("No repository full name found, skipping PR comments.");
+            // Try multiple ways to get repository info
+            let owner, repo;
+            
+            if (context.repository?.full_name) {
+              [owner, repo] = context.repository.full_name.split('/');
+            } else if (context.repository?.owner?.login && context.repository?.name) {
+              owner = context.repository.owner.login;
+              repo = context.repository.name;
+            } else {
+              console.error("Cannot determine repository owner/name from context");
               return;
             }
 
-            const [owner, repo] = repoFullName.split('/');
             const prNumber = pullRequest.number;
             const commitSha = pullRequest.head.sha;
 
@@ -151,9 +200,9 @@ jobs:
                       line: comment.line || 1,
                       side: 'RIGHT'
                     });
-                    console.log(`Posted comment for ${review.filePath}:${comment.line || 1}`);
+                    console.log(`✅ Posted comment for ${review.filePath}:${comment.line || 1}`);
                   } catch (error) {
-                    console.error(`Failed to post comment for ${review.filePath}:`, error.message);
+                    console.error(`❌ Failed to post comment for ${review.filePath}:`, error.message);
                   }
                 }
               }
@@ -163,68 +212,117 @@ jobs:
           }
 
           async function postPushIssue(reviews) {
-            const repoFullName = context.repository?.full_name;
-            if (!repoFullName) {
-              console.warn("No repository full name found, skipping issue creation.");
+            // Try multiple ways to get repository info
+            let owner, repo;
+            
+            if (context.repository?.full_name) {
+              [owner, repo] = context.repository.full_name.split('/');
+            } else if (context.repository?.owner?.login && context.repository?.name) {
+              owner = context.repository.owner.login;
+              repo = context.repository.name;
+            } else if (context.repositoryUrl) {
+              // Extract from repository URL: git://github.com/user/repo.git
+              const match = context.repositoryUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\.git/);
+              if (match) {
+                owner = match[1];
+                repo = match[2];
+              }
+            }
+
+            if (!owner || !repo) {
+              console.error("❌ Cannot determine repository owner/name from context");
+              console.error("Available context keys:", Object.keys(context));
               return;
             }
 
-            const [owner, repo] = repoFullName.split('/');
             const commitSha = context.sha?.substring(0, 7) || "unknown";
             let body = `## 🤖 AI Code Review - Commit \`${commitSha}\`\n\n`;
+            
+            body += `**Event:** ${context.event_name}\n`;
+            body += `**Branch:** ${context.ref?.replace('refs/heads/', '') || 'unknown'}\n`;
+            body += `**Author:** ${context.actor || 'unknown'}\n\n`;
 
             for (const r of reviews) {
               if (!r) continue;
-              body += `### \`${r.filePath}\`\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
+              body += `### 📄 \`${r.filePath}\`\n`;
+              body += `**Score:** ${r.score}/10 ⭐\n`;
+              body += `**Summary:** ${r.summary}\n\n`;
+              
               if (r.comments && r.comments.length > 0) {
+                body += `**Issues Found:**\n`;
                 r.comments.forEach(c => {
-                  body += `- (${c.severity}) ${c.type}: ${c.message}\n`;
+                  const emoji = c.severity === 'high' ? '🚨' : c.severity === 'medium' ? '⚠️' : '💡';
+                  body += `${emoji} **${c.type?.toUpperCase()}** (${c.severity}): ${c.message}\n`;
                 });
+              } else {
+                body += `✅ **No issues found!**\n`;
               }
               body += `\n---\n`;
             }
 
             try {
-              await octokit.issues.create({
+              const issue = await octokit.issues.create({
                 owner,
                 repo,
                 title: `🤖 AI Code Review - ${commitSha}`,
-                body
+                body,
+                labels: ['ai-review', 'code-quality']
               });
-              console.log(`Created issue for commit ${commitSha}`);
+              console.log(`✅ Created issue #${issue.data.number} for commit ${commitSha}`);
+              console.log(`🔗 Issue URL: ${issue.data.html_url}`);
             } catch (error) {
-              console.error("Error creating issue:", error.message);
+              console.error("❌ Error creating issue:", error.message);
             }
           }
 
           (async () => {
-            console.log(`Event: ${context.event_name}`);
-            console.log(`Changed files: ${changedFiles.join(', ')}`);
+            console.log(`🚀 Starting AI Code Review...`);
+            console.log(`📝 Event: ${context.event_name}`);
+            console.log(`📁 Changed files: ${changedFiles.join(', ')}`);
             
+            if (changedFiles.length === 0) {
+              console.log("⚠️  No changed files found, exiting...");
+              return;
+            }
+
             let reviews = [];
             for (const filePath of changedFiles) {
               if (!fs.existsSync(filePath)) {
-                console.log(`Skipping deleted file: ${filePath}`);
+                console.log(`⚠️  Skipping deleted file: ${filePath}`);
                 continue;
               }
               
-              console.log(`Analyzing: ${filePath}`);
+              console.log(`🔍 Analyzing: ${filePath}`);
               const code = fs.readFileSync(filePath, 'utf8');
+              
+              // Skip very large files
+              if (code.length > 50000) {
+                console.log(`⚠️  Skipping large file (${code.length} chars): ${filePath}`);
+                continue;
+              }
+              
               const result = await analyzeCode(filePath, code);
               if (result) {
                 result.filePath = filePath;
                 reviews.push(result);
-                console.log(`Analysis complete for ${filePath}: Score ${result.score}/10`);
+                console.log(`✅ Analysis complete for ${filePath}: Score ${result.score}/10`);
               }
             }
 
+            if (reviews.length === 0) {
+              console.log("⚠️  No files were analyzed, exiting...");
+              return;
+            }
+
             if (context.event_name === 'pull_request') {
-              console.log("Processing as pull request...");
+              console.log("🔄 Processing as pull request...");
               await postPRComments(reviews);
             } else {
-              console.log("Processing as push event...");
+              console.log("🔄 Processing as push event...");
               await postPushIssue(reviews);
             }
+            
+            console.log("🎉 AI Code Review completed!");
           })();
           EOF
         env:
