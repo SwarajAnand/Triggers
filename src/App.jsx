@@ -11,7 +11,8 @@ const App = () => {
     }
   }
 
-  fetchData // ❌ function call ki jagah reference de diya
+  fetchData 
+  testFn(); // checking if it detect or not
 
   return (
     <div>
