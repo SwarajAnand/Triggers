@@ -104,8 +104,17 @@ env:
 ```
 
 
+---
 
+## 📸 Screenshots
 
+### ✅ GitHub Actions Run once you push and code reviewed
+![GitHub Action Workflow](Action.png)
+
+### 🔍 AI Review Output
+![AI Code Review Result](Review.png)
+
+---
 
 
 ```
