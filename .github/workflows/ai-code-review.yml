@@ -108,10 +108,50 @@ jobs:
             const prompt = `
             Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
             {
-              "score": 1-10,
-              "summary": "Suppose you are a senior developer reviewing this code give detailed feedback and suggestions for improvement.",
+              "score": 7,
+              "summary": "The code is functional but can be improved in readability, maintainability, and error handling. There are also some performance considerations that could be addressed.",
               "comments": [
-                { "line": 5, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
+                {
+                  "line": 5,
+                  "type": "bug",
+                  "severity": "high",
+                  "message": "The variable `response` is used without null/undefined checks. If the API fails, this will throw an error."
+                },
+                {
+                  "line": 12,
+                  "type": "performance",
+                  "severity": "medium",
+                  "message": "Repeated JSON parsing can be avoided by caching the result in a variable."
+                },
+                {
+                  "line": 18,
+                  "type": "style",
+                  "severity": "low",
+                  "message": "Consider using async/await consistently instead of mixing `.then()` and `await` for better readability."
+                },
+                {
+                  "line": 25,
+                  "type": "security",
+                  "severity": "high",
+                  "message": "User input is directly interpolated into a query string. This may open the door for injection attacks. Use parameterized queries or proper sanitization."
+                }
+              ],
+              "suggestions": [
+                {
+                  "title": "Improve error handling",
+                  "details": "Wrap the fetch logic in a try/catch and provide meaningful error messages instead of console logs. This makes debugging easier and improves UX.",
+                  "code": "```javascript\ntry {\n  const response = await fetch('/api/data');\n  if (!response.ok) throw new Error(`Request failed: ${response.status}`);\n  const data = await response.json();\n  console.log('Fetched data:', data);\n} catch (error) {\n  console.error('Error fetching data:', error.message);\n}\n```"
+                },
+                {
+                  "title": "Avoid unnecessary re-parsing",
+                  "details": "Instead of parsing JSON multiple times, store it once and reuse.",
+                  "code": "```javascript\nconst data = await response.json();\ndoSomething(data);\ndoSomethingElse(data);\n```"
+                },
+                {
+                  "title": "Consistent async patterns",
+                  "details": "Choose either async/await or .then() chaining across the codebase for consistency. Prefer async/await for readability.",
+                  "code": "```javascript\nasync function fetchData() {\n  try {\n    const res = await fetch('/api/data');\n    const data = await res.json();\n    return data;\n  } catch (err) {\n    console.error(err);\n  }\n}\n```"
+                }
               ]
             }
 
