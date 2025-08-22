@@ -5,20 +5,18 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches:
-      - main
-      - develop
-      - master
+      - "**" 
 
 jobs:
   ai-review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
       issues: write
+      pull-requests: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Get changed files
@@ -27,8 +25,8 @@ jobs:
         with:
           files: |
             **/*.js
-            **/*.ts
             **/*.jsx
+            **/*.ts
             **/*.tsx
             **/*.py
             **/*.java
@@ -39,26 +37,20 @@ jobs:
             **/*.rs
             **/*.php
             **/*.rb
+            **/*.yml
+            **/*.yaml
+          separator: ' '
 
-      - name: Setup Node.js
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      - name: Install dependencies
-        if: steps.changed-files.outputs.any_changed == 'true'
+      - name: Debug Context
         run: |
-          npm init -y
-          npm install axios @octokit/rest
+          echo "Event: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "Ref: ${{ github.ref }}"
 
-      - name: Run AI Review (Groq API)
+      - name: Run AI Code Review
         if: steps.changed-files.outputs.any_changed == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-          GITHUB_CONTEXT: ${{ toJson(github) }}
         run: |
           node --input-type=module - <<'EOF'
           import fs from 'fs';
@@ -70,17 +62,22 @@ jobs:
           const changedFiles = process.env.CHANGED_FILES?.split(' ') || [];
           const context = JSON.parse(process.env.GITHUB_CONTEXT || '{}');
 
-          // Debug logging
+          console.log('=== DEBUG: Context Analysis ===');
           console.log('Event name:', context.event_name);
-          console.log('Has payload:', !!context.payload);
-          console.log('Has pull_request:', !!(context.payload && context.payload.pull_request));
           console.log('Repository:', context.repository);
+          console.log('Repository full_name:', context.repository?.full_name);
+          console.log('Repository name:', context.repository?.name);
+          console.log('Repository owner:', context.repository?.owner?.login);
+          console.log('Actor:', context.actor);
+          console.log('Ref:', context.ref);
+          console.log('SHA:', context.sha);
+          console.log('================================');
 
           const getLanguage = (ext) => ({
             '.js': 'javascript',
             '.ts': 'typescript',
-            '.jsx': 'javascript',
-            '.tsx': 'typescript',
+            '.jsx': 'javascriptreact',
+            '.tsx': 'typescriptreact',
             '.py': 'python',
             '.java': 'java',
             '.cpp': 'cpp',
@@ -89,35 +86,30 @@ jobs:
             '.go': 'go',
             '.rs': 'rust',
             '.php': 'php',
-            '.rb': 'ruby'
+            '.rb': 'ruby',
+            '.yml': 'yaml',
+            '.yaml': 'yaml'
           }[ext] || 'text');
 
           async function analyzeCode(filePath, code) {
             const prompt = `
-            You are acting as a senior software engineer doing a code review. 
-            Review the following ${getLanguage(path.extname(filePath))} code and give a detailed JSON response in the following format:
+            You are a senior software engineer reviewing code. 
+            Provide a JSON response:
 
             {
               "score": 1-10,
-              "summary": "short but clear summary of overall code quality",
+              "summary": "overall quality summary",
               "comments": [
-                { 
-                  "line": number | null, 
-                  "type": "bug|performance|style|security|suggestion", 
-                  "severity": "low|medium|high", 
-                  "message": "Detailed feedback written as if mentoring a junior developer. Give reasoning why it's an issue and how to improve it. If suggesting a change, describe it in words or pseudo-code (not actual code blocks)." 
+                {
+                  "line": number | null,
+                  "type": "bug|performance|style|security|suggestion",
+                  "severity": "low|medium|high",
+                  "message": "Detailed feedback with reasoning and improvement suggestions (no fenced code blocks, describe changes in words or pseudo-code)."
                 }
               ]
             }
 
-            Rules:
-            - Act like a senior developer: be detailed, constructive, and clear.  
-            - Never output actual code in code fences (like \`\`\`).  
-            - When suggesting improvements, explain them in descriptive steps or pseudo-code.  
-            - Highlight best practices and possible pitfalls.
-            - Focus on meaningful issues, not nitpicks.
-
-            Code to review:
+            Code:
             ---
             ${code}
             ---
@@ -129,15 +121,13 @@ jobs:
                 {
                   model: "llama3-8b-8192",
                   messages: [{ role: "user", content: prompt }],
-                  temperature: 0.3,
-                  max_tokens: 2048
+                  temperature: 0.3
                 },
                 {
                   headers: {
-                    Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+                    Authorization: \`Bearer \${process.env.GROQ_API_KEY}\`,
                     "Content-Type": "application/json"
-                  },
-                  timeout: 30000
+                  }
                 }
               );
 
@@ -147,150 +137,170 @@ jobs:
               if (match) {
                 try {
                   return JSON.parse(match[0]);
-                } catch (err) {
-                  console.warn("Invalid JSON from AI, using raw text as summary.");
+                } catch {
+                  console.warn("⚠️ Invalid JSON from AI, fallback to summary text.");
                   return { score: 5, summary: content, comments: [] };
                 }
-              } else {
-                return { score: 5, summary: content, comments: [] };
               }
+              return { score: 5, summary: content, comments: [] };
             } catch (e) {
-              console.error("Error analyzing file:", filePath, e.message);
+              console.error("❌ Error analyzing file:", filePath, e.message);
               return { score: 0, summary: "AI analysis failed", comments: [] };
             }
           }
 
           async function postPRComments(reviews) {
-            // Check if we're in a PR context more thoroughly
-            const isPR = context.event_name === 'pull_request' && 
-                        context.payload && 
-                        context.payload.pull_request;
-
-            if (!isPR) {
-              console.warn("No PR context found. Event:", context.event_name);
-              console.warn("Payload keys:", Object.keys(context.payload || {}));
+            const pullRequest = context.pull_request;
+            if (!pullRequest) {
+              console.error("❌ No pull request context found");
               return;
             }
 
-            const [owner, repo] = context.repository.split('/');
-            const prNumber = context.payload.pull_request.number;
-            const headSha = context.payload.pull_request.head.sha;
+            let owner, repo;
+            if (context.repository?.full_name) {
+              [owner, repo] = context.repository.full_name.split('/');
+            } else if (context.repository?.owner?.login && context.repository?.name) {
+              owner = context.repository.owner.login;
+              repo = context.repository.name;
+            } else {
+              console.error("❌ Cannot determine repository owner/name");
+              return;
+            }
 
-            console.log(`Posting comments for PR #${prNumber} in ${owner}/${repo}`);
+            const prNumber = pullRequest.number;
 
             for (const review of reviews) {
-              if (!review || !review.comments || review.comments.length === 0) continue;
-              
+              if (!review || !review.comments) continue;
+
               for (const comment of review.comments) {
                 try {
-                  await octokit.rest.pulls.createReviewComment({
+                  await octokit.pulls.createReviewComment({
                     owner,
                     repo,
                     pull_number: prNumber,
-                    body: `**${comment.type?.toUpperCase() || "NOTE"} (${comment.severity || "info"})**: ${comment.message}`,
-                    commit_id: headSha,
+                    commit_id: pullRequest.head.sha,
                     path: review.filePath,
+                    body: comment.message,
                     line: comment.line || 1,
                     side: 'RIGHT'
                   });
-                  console.log(`Posted comment for ${review.filePath}:${comment.line}`);
+                  console.log(`✅ Posted comment for ${review.filePath}:${comment.line || 1}`);
                 } catch (error) {
-                  console.error(`Failed to post comment for ${review.filePath}:`, error.message);
-                  
-                  // Fallback: post as a general PR comment if line comment fails
-                  try {
-                    await octokit.rest.issues.createComment({
-                      owner,
-                      repo,
-                      issue_number: prNumber,
-                      body: `**${comment.type?.toUpperCase() || "NOTE"}** in \`${review.filePath}\` (line ${comment.line || '?'}): ${comment.message}`
-                    });
-                    console.log(`Posted fallback comment for ${review.filePath}`);
-                  } catch (fallbackError) {
-                    console.error(`Failed to post fallback comment:`, fallbackError.message);
-                  }
+                  console.error(`❌ Failed to post comment for ${review.filePath}:`, error.message);
                 }
               }
             }
           }
 
           async function postPushIssue(reviews) {
-            if (reviews.length === 0) {
-              console.log("No reviews to post as issue");
+            let owner, repo;
+            if (context.repository?.full_name) {
+              [owner, repo] = context.repository.full_name.split('/');
+            } else if (context.repository?.owner?.login && context.repository?.name) {
+              owner = context.repository.owner.login;
+              repo = context.repository.name;
+            } else if (context.repositoryUrl) {
+              const match = context.repositoryUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\.git/);
+              if (match) {
+                owner = match[1];
+                repo = match[2];
+              }
+            }
+
+            if (!owner || !repo) {
+              console.error("❌ Cannot determine repository owner/name");
               return;
             }
 
-            const [owner, repo] = context.repository.split('/');
             const commitSha = context.sha?.substring(0, 7) || "unknown";
             let body = `## 🤖 AI Code Review - Commit \`${commitSha}\`\n\n`;
+            body += `**Event:** ${context.event_name}\n`;
+            body += `**Branch:** ${context.ref?.replace('refs/heads/', '') || 'unknown'}\n`;
+            body += `**Author:** ${context.actor || 'unknown'}\n\n`;
 
             for (const r of reviews) {
               if (!r) continue;
-              body += `### \`${r.filePath}\`\n**Score:** ${r.score}/10\n**Summary:** ${r.summary}\n\n`;
-              
-              if (r.comments && r.comments.length > 0) {
+              body += `### 📄 \`${r.filePath}\`\n`;
+              body += `**Score:** ${r.score}/10 ⭐\n`;
+              body += `**Summary:** ${r.summary}\n\n`;
+
+              if (r.comments?.length > 0) {
+                body += `**Issues Found:**\n`;
                 r.comments.forEach(c => {
-                  body += `- **${c.type}** (${c.severity}): ${c.message}\n`;
+                  const emoji = c.severity === 'high' ? '🚨' : c.severity === 'medium' ? '⚠️' : '💡';
+                  body += `${emoji} **${c.type?.toUpperCase()}** (${c.severity}): ${c.message}\n`;
                 });
               } else {
-                body += `No specific issues found.\n`;
+                body += `✅ **No issues found!**\n`;
               }
               body += `\n---\n`;
             }
 
             try {
-              await octokit.rest.issues.create({
+              const issue = await octokit.issues.create({
                 owner,
                 repo,
                 title: `🤖 AI Code Review - ${commitSha}`,
-                body
+                body,
+                labels: ['ai-review', 'code-quality']
               });
-              console.log(`Created issue for commit ${commitSha}`);
+              console.log(`✅ Created issue #${issue.data.number} for commit ${commitSha}`);
             } catch (error) {
-              console.error(`Failed to create issue:`, error.message);
+              console.error("❌ Error creating issue:", error.message);
             }
           }
 
-          // Main execution
           (async () => {
-            try {
-              console.log(`Processing ${changedFiles.length} changed files`);
-              
-              let reviews = [];
-              for (const filePath of changedFiles) {
-                if (fs.existsSync(filePath)) {
-                  console.log(`Analyzing: ${filePath}`);
-                  const code = fs.readFileSync(filePath, 'utf8');
-                  
-                  // Skip very large files
-                  if (code.length > 50000) {
-                    console.log(`Skipping ${filePath} - file too large`);
-                    continue;
-                  }
-                  
-                  const result = await analyzeCode(filePath, code);
-                  if (result) {
-                    result.filePath = filePath;
-                    reviews.push(result);
-                    console.log(`Analysis complete for ${filePath} - Score: ${result.score}/10`);
-                  }
-                } else {
-                  console.warn(`File not found: ${filePath}`);
-                }
-              }
+            console.log(`🚀 Starting AI Code Review...`);
+            console.log(`📝 Event: ${context.event_name}`);
+            console.log(`📁 Changed files: ${changedFiles.join(', ')}`);
 
-              console.log(`Completed analysis of ${reviews.length} files`);
-
-              if (context.event_name === 'pull_request') {
-                await postPRComments(reviews);
-              } else {
-                await postPushIssue(reviews);
-              }
-
-              console.log('AI code review completed successfully!');
-            } catch (error) {
-              console.error('AI code review failed:', error);
-              process.exit(1);
+            if (changedFiles.length === 0) {
+              console.log("⚠️  No changed files found, exiting...");
+              return;
             }
+
+            let reviews = [];
+            for (const filePath of changedFiles) {
+              if (!fs.existsSync(filePath)) {
+                console.log(`⚠️  Skipping deleted file: ${filePath}`);
+                continue;
+              }
+
+              console.log(`🔍 Analyzing: ${filePath}`);
+              const code = fs.readFileSync(filePath, 'utf8');
+
+              if (code.length > 50000) {
+                console.log(`⚠️  Skipping large file (${code.length} chars): ${filePath}`);
+                continue;
+              }
+
+              const result = await analyzeCode(filePath, code);
+              if (result) {
+                result.filePath = filePath;
+                reviews.push(result);
+                console.log(`✅ Analysis complete for ${filePath}: Score ${result.score}/10`);
+              }
+            }
+
+            if (reviews.length === 0) {
+              console.log("⚠️  No files were analyzed, exiting...");
+              return;
+            }
+
+            if (context.event_name === 'pull_request') {
+              console.log("🔄 Processing as pull request...");
+              await postPRComments(reviews);
+            } else {
+              console.log("🔄 Processing as push event...");
+              await postPushIssue(reviews);
+            }
+
+            console.log("🎉 AI Code Review completed!");
           })();
           EOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          GITHUB_CONTEXT: ${{ toJson(github) }}
