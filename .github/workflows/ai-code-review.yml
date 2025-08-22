@@ -1,12 +1,13 @@
 name: AI Code Review
-
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types:
+      - opened
+      - synchronize
+      - reopened
   push:
     branches:
-      - "**" # Match all branches
-
+      - "**"
 jobs:
   ai-review:
     runs-on: ubuntu-latest
@@ -15,22 +16,18 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-      
+          node-version: "18"
       - name: Install dependencies
         run: |
           npm install @octokit/rest axios
-      
       - name: Get changed files
         id: changed-files
         uses: tj-actions/changed-files@v44
@@ -51,8 +48,7 @@ jobs:
             **/*.rb
             **/*.yml
             **/*.yaml
-          separator: ' '
-      
+          separator: " "
       - name: Debug Context
         run: |
           echo "Event: ${{ github.event_name }}"
@@ -60,31 +56,49 @@ jobs:
           echo "Actor: ${{ github.actor }}"
           echo "SHA: ${{ github.sha }}"
           echo "Ref: ${{ github.ref }}"
-      
       - name: Run AI Code Review
         if: steps.changed-files.outputs.any_changed == 'true'
-        run: |
+        run: >
           node --input-type=module - <<'EOF'
+
           import fs from 'fs';
+
           import path from 'path';
+
           import { Octokit } from '@octokit/rest';
+
           import axios from 'axios';
 
+
           const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
           const changedFiles = process.env.CHANGED_FILES?.split(' ') || [];
+
           const context = JSON.parse(process.env.GITHUB_CONTEXT || '{}');
 
+
           // Debug: Print context to see what we're getting
+
           console.log('=== DEBUG: Context Analysis ===');
+
           console.log('Event name:', context.event_name);
+
           console.log('Repository:', context.repository);
+
           console.log('Repository full_name:', context.repository?.full_name);
+
           console.log('Repository name:', context.repository?.name);
+
           console.log('Repository owner:', context.repository?.owner?.login);
+
           console.log('Actor:', context.actor);
+
           console.log('Ref:', context.ref);
+
           console.log('SHA:', context.sha);
+
           console.log('================================');
+
 
           const getLanguage = (ext) => ({
             '.js': 'javascript',
@@ -104,8 +118,14 @@ jobs:
             '.yaml': 'yaml'
           }[ext] || 'text');
 
+
+          async function analyzeCode(filePath, code) {
+
           const prompt = `
-          Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
+
+          Review the following ${getLanguage(path.extname(filePath))} code and
+          return JSON:
+
           {
             "score": 7,
             "summary": "The code is functional but can be improved in readability, maintainability, and error handling. There are also some performance considerations that could be addressed.",
@@ -154,10 +174,15 @@ jobs:
             ]
           }
 
+
           Code:
+
           \\\`\\\`
+
           ${code}
+
           \\\`\\\`
+
           `;
 
             try {
@@ -194,6 +219,7 @@ jobs:
               return { score: 0, summary: "AI analysis failed", comments: [] };
             }
           }
+
 
           async function postPRComments(reviews) {
             if (context.event_name !== 'pull_request') {
@@ -251,6 +277,7 @@ jobs:
               console.error("Error posting PR comments:", error.message);
             }
           }
+
 
           async function postPushIssue(reviews) {
             // Try multiple ways to get repository info
@@ -316,6 +343,7 @@ jobs:
             }
           }
 
+
           (async () => {
             console.log(`🚀 Starting AI Code Review...`);
             console.log(`📝 Event: ${context.event_name}`);
@@ -365,6 +393,7 @@ jobs:
             
             console.log("🎉 AI Code Review completed!");
           })();
+
           EOF
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
