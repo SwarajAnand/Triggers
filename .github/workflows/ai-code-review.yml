@@ -109,7 +109,7 @@ jobs:
             Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
             {
               "score": 1-10,
-              "summary": "short summary",
+              "summary": "Suppose you are a senior developer reviewing this code give detailed feedback and suggestions for improvement.",
               "comments": [
                 { "line": 5, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
               ]
