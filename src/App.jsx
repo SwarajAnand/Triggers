@@ -12,12 +12,12 @@ const App = () => {
   }
 
   fetchData 
-  testFn(); // checking if it detect or not
+  testFn1(); // checking if it detect or not
 
   return (
     <div>
       <h1>Testing the app</h1>
-      <button onClick={fetchData()}>Fetch Data</button> 
+      <button onClick={testFn1()}>Fetch Data</button> 
       {/* ❌ onClick pe function ko call kar diya directly, isse render time pe hi call hoga */}
     </div>
   )
