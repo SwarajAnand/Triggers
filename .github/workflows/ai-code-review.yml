@@ -105,21 +105,58 @@ jobs:
           }[ext] || 'text');
 
           async function analyzeCode(filePath, code) {
-            const prompt = `
-            Review the following ${getLanguage(path.extname(filePath))} code and return JSON:
-            {
-              "score": 1-10,
-              "summary": "short summary",
-              "comments": [
-                { "line": 5, "type": "bug|performance|style|security", "severity": "low|medium|high", "message": "feedback" }
-              ]
-            }
+          const prompt = `
+          You are a senior code reviewer. Review the following ${getLanguage(path.extname(filePath))} code.  
 
-            Code:
-            \`\`\`
-            ${code}
-            \`\`\`
-            `;
+          Return **valid JSON only** in the following format:
+
+          {
+            "score": 1-10,
+            "summary": "Short summary of code quality",
+            "comments": [
+              { 
+                "line": 5, 
+                "type": "bug|performance|style|security", 
+                "severity": "low|medium|high", 
+                "message": "Explain the issue clearly",
+                "suggestion": "Code snippet showing how to fix it"
+              }
+            ]
+          }
+
+          - Always include **specific line numbers** where possible.  
+          - Always provide **concrete code suggestions** inside the \`suggestion\` field, using proper syntax (no pseudo code).  
+          - Keep suggestions short and focused, like a real code review comment.  
+
+          Code to review:
+          \`\`\`${getLanguage(path.extname(filePath))}
+          ${code}
+          \`\`\`
+          `;
+          
+          {
+            "score": 1-10,
+            "summary": "Short summary of code quality",
+            "comments": [
+              { 
+                "line": 5, 
+                "type": "bug|performance|style|security", 
+                "severity": "low|medium|high", 
+                "message": "Explain the issue clearly",
+                "suggestion": "Code snippet showing how to fix it"
+              }
+            ]
+          }
+
+          - Always include **specific line numbers** where possible.  
+          - Always provide **concrete code suggestions** inside the \`suggestion\` field, using proper syntax (no pseudo code).  
+          - Keep suggestions short and focused, like a real code review comment.  
+
+          Code to review:
+          \`\`\`${getLanguage(path.extname(filePath))}
+          ${code}
+          \`\`\`
+          `;
 
             try {
               const res = await axios.post(
