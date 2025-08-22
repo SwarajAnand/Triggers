@@ -3,20 +3,21 @@ import React from 'react'
 const App = () => {
   async function fetchData() {
     try {
-      const response = await fetch('/api/data');
-      const data = await response.json();
-      console.log('Fetched data:', data);
-    } catch (error) {
-      console.error('Error fetching data:', error);
+      const response = await fetch('/api/data')
+      const data = response.notAFunction()   // ❌ wrong: response me yeh method hi nahi hota
+      console.log('Fetched data:', data)
+    } catch {
+      console.error('Some error occurred but I forgot to log it') // ❌ missing error param
     }
   }
 
-  fetchData();
+  fetchData // ❌ function call ki jagah reference de diya
 
   return (
     <div>
       <h1>Testing the app</h1>
-      <button onClick={fetchData}>Fetch Data</button>
+      <button onClick={fetchData()}>Fetch Data</button> 
+      {/* ❌ onClick pe function ko call kar diya directly, isse render time pe hi call hoga */}
     </div>
   )
 }
